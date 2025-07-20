@@ -1,0 +1,294 @@
+# termostato solare
+# è composto da 2 blocchi: comparatore e controllo_uscita
+# un comparatore che, quando richiamato legge 5 valori.
+# temperatura_serbatoio 
+# temperatura pannello
+# errore_sensore_serbatoio
+# errore_sensore_pannello
+# deltaT
+# viene richiamato dalla variazione di uno qualsiasi di questi valori
+# se temperatura pannello > temperatura serbatoio + deltaT, attiva l'uscita
+# l'uscita è attiva anche se uno dei due errori è attivo
+# l'uscita è disattiva se è attivo il parametro disabilita_comparatore
+# l'uscita è memorizzata sulla variabile globale uscita_comparatore
+#
+# il blocco controllo_uscita legge i seguenti valori:
+# uscita_comparatore
+# switch_abilita_pompa
+# switch_disabilita_pompa
+# tempo_on
+# tempo_off
+# cicla all'infinito e attiva l'uscita se uscita_comparatore è attiva o se forza_uscita_on è attivo
+# l'uscita si attiva per un tempo_on e si disattiva per tempo_off
+
+esphome:
+  name: termostato-solare
+  on_boot:
+    then:
+      - script.execute: pwm_script
+
+esp32:
+  board: esp32-c6-devkitc-1
+  framework:
+    type: esp-idf
+
+network:
+  enable_ipv6: true
+
+openthread:
+  tlv: !secret my_tlv
+
+# Abilita logging
+logger:
+  level: INFO
+
+# Abilita Home Assistant API
+api:
+  password: ""
+
+# Abilita aggiornamenti OTA
+ota:
+  - platform: esphome
+    password: ""
+
+script:
+  - id: pwm_script
+    then:
+      - while:
+          condition: 
+            - lambda: 'return true;' 
+          then:
+          - if:
+              condition: 
+                - lambda: 'return id(uscita_comparatore);' 
+              then:
+                - lambda: 'id(uscita_pwm) = true;'
+                - script.execute: controllo_uscita
+                - if:
+                    condition: 
+                      - lambda: "return (id(time_off).state > 0);"
+                    then:                          
+                      - delay: !lambda "return (int)(id(time_on).state * 1000);"
+                      - lambda: 'id(uscita_pwm) = false;'
+                      - script.execute: controllo_uscita
+                      - delay: !lambda "return (int)(id(time_off).state * 1000);"
+                    else:
+                      - delay: 1s
+              else: 
+                - if:
+                    condition: 
+                      - lambda: "return (id(uscita_pwm) == true);"
+                    then:                          
+                      - lambda: 'id(uscita_pwm) = false;'
+                      - script.execute: controllo_uscita
+                - delay: 1s
+
+  - id: controllo_uscita
+    then:
+      - logger.log: "controllo uscita"
+      - lambda: |-
+          if(id(switch_disabilita_pompa).state) {
+            id(relepompa).turn_off();
+          } else {
+            if(id(switch_abilita_pompa).state)
+              id(relepompa).turn_on();
+            else
+              if (id(uscita_pwm)) id(relepompa).turn_on(); else id(relepompa).turn_off();
+          }
+
+  - id: comparatore
+    then: 
+      - if:
+          condition:
+            - lambda: |-
+                if(id(errore_sensore_pannello)) return true;
+                if(id(errore_sensore_serbatoio)) return true;
+                return (id(temperatura_pannello).state > id(temperatura_serbatoio).state + id(DeltaT).state);
+          then: 
+            - globals.set:
+                id: uscita_comparatore
+                value: 'true'
+          else: 
+            - globals.set:
+                id: uscita_comparatore
+                value: 'false'
+      - logger.log:
+          format: "Comparatore=%d, errore_pannello=%d, errore_serbatoio=%d"
+          args: [ 'id(uscita_comparatore)','id(errore_sensore_pannello)','id(errore_sensore_serbatoio)' ]
+
+output:
+  - platform: gpio
+    pin: GPIO2
+    id: relepompa
+
+# Example button configuration
+# button:
+#   - platform: template
+#     name: avvia script
+#     id: my_button
+
+#     # Optional variables:
+#     icon: "mdi:emoticon-outline"
+#     on_press:
+#       - script.execute: boot_script
+
+switch:
+  - platform: template
+    name: "Abilita pompa"
+    icon: "mdi:restart"
+    id: switch_abilita_pompa
+    restore_mode: ALWAYS_OFF
+    optimistic: true
+    on_turn_on: 
+      then:
+        - script.execute: controllo_uscita
+    on_turn_off: 
+      then:
+        - script.execute: controllo_uscita
+
+  - platform: template
+    name: "Disabilita pompa"
+    icon: "mdi:restart"
+    id: switch_disabilita_pompa
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    on_turn_on: 
+      then:
+        - script.execute: controllo_uscita
+    on_turn_off: 
+      then:
+        - script.execute: controllo_uscita
+
+globals:
+  - id: uscita_pwm
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+  - id: errore_sensore_pannello
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+  - id: errore_sensore_serbatoio
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+  - id: uscita_comparatore
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+# Tempi configurabili
+number:
+  - platform: template
+    name: "Tempo ON (s)"
+    id: time_on
+    min_value: 1
+    max_value: 600
+    step: 1
+    initial_value: 120
+    optimistic: true
+    restore_value: True
+
+  - platform: template
+    name: "Tempo OFF (s)"
+    id: time_off
+    min_value: 0
+    max_value: 600
+    step: 1
+    initial_value: 200
+    optimistic: true
+    restore_value: True
+
+  - platform: template
+    name: "DeltaT (C)"
+    device_class: "temperature"
+    id: DeltaT
+    min_value: 1
+    max_value: 30
+    step: 1
+    initial_value: 10
+    optimistic: true
+    restore_value: True
+    on_value: 
+      then:
+        - script.execute: comparatore
+
+one_wire:
+  - platform: gpio
+    pin: GPIO23
+    id: busSolare
+  - platform: gpio
+    pin: GPIO22
+    id: busSerbatoio
+
+sensor:
+  - platform: dallas_temp
+    one_wire_id: busSolare
+    update_interval: 10s
+    resolution: 10
+    unit_of_measurement: "°C"
+    device_class: "temperature"
+    state_class: "measurement"
+    accuracy_decimals: 1
+    name: "Temperatura pannello solare"
+    id: temperatura_pannello
+    filters:
+      - delta: 1
+    on_value: 
+      - globals.set:
+          id: errore_sensore_pannello
+          value: 'false'
+      - script.execute: comparatore
+
+    on_raw_value:
+      - if:
+          condition:
+            - lambda: 'return isnan(x);' 
+          then:
+            - globals.set:
+                id: errore_sensore_pannello
+                value: 'true'
+            - script.execute: comparatore
+      
+
+
+  - platform: dallas_temp
+    one_wire_id: busSerbatoio
+    update_interval: 10s
+    resolution: 10
+    unit_of_measurement: "°C"
+    device_class: "temperature"
+    state_class: "measurement"
+    accuracy_decimals: 1
+    name: "Temperatura serbatoio"
+    id: temperatura_serbatoio
+    filters:
+      - delta: 1
+    on_value: 
+      - globals.set:
+          id: errore_sensore_serbatoio
+          value: 'false'
+      - script.execute: comparatore
+
+    on_raw_value:
+      - if:
+          condition:
+            - lambda: 'return isnan(x);' 
+          then:
+            - globals.set:
+                id: errore_sensore_serbatoio
+                value: 'true'
+            - script.execute: comparatore
+
+binary_sensor:
+  - platform: template
+    name: "Errore sensore serbatoio"
+    lambda: |-
+      return id(errore_sensore_serbatoio);
+  - platform: template
+    name: "Errore sensore pannello"
+    lambda: |-
+      return id(errore_sensore_pannello);
